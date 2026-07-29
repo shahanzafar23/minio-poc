@@ -1,0 +1,99 @@
+services:
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      # Console backend runs inside container — must reach API via host port mapping (not localhost:9010 in-container)
+      MINIO_SERVER_URL: http://host.docker.internal:${MINIO_API_PORT:-9010}
+      MINIO_BROWSER_REDIRECT_URL: http://localhost:${MINIO_CONSOLE_PORT:-9001}
+    volumes:
+      # POC: bind mount to local folder (no EBS). EKS: replace with PVC mount at /data
+      - ./data/minio:/data
+    ports:
+      - "${MINIO_API_PORT:-9010}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - minio-net
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://minio:9000}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-dobox-dev-bucket}
+      MINIO_PUBLIC_URL: ${MINIO_PUBLIC_URL:-http://localhost}
+      MINIO_DEMO_APP_USER: ${MINIO_DEMO_APP_USER:-demo-app}
+      MINIO_DEMO_APP_SECRET: ${MINIO_DEMO_APP_SECRET:-demo-app-secret}
+      MINIO_DEMO_ADMIN_USER: ${MINIO_DEMO_ADMIN_USER:-demo-admin}
+      MINIO_DEMO_ADMIN_SECRET: ${MINIO_DEMO_ADMIN_SECRET:-demo-admin-secret}
+    volumes:
+      - ./init/init-minio.sh:/init/init-minio.sh:ro
+    entrypoint: ["/bin/sh", "/init/init-minio.sh"]
+    networks:
+      - minio-net
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: minio-nginx
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - minio-net
+
+  demo-api:
+    build:
+      context: ./demo-api
+      dockerfile: Dockerfile
+    container_name: minio-demo-api
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://minio:9000}
+      MINIO_PUBLIC_URL: ${MINIO_PUBLIC_URL:-http://localhost}
+      MINIO_ACCESS_KEY: ${MINIO_DEMO_APP_USER:-demo-app}
+      MINIO_SECRET_KEY: ${MINIO_DEMO_APP_SECRET:-demo-app-secret}
+      MINIO_BUCKET: ${MINIO_BUCKET:-dobox-dev-bucket}
+      MINIO_REGION: us-east-1
+    ports:
+      - "${DEMO_API_PORT:-8080}:8080"
+    networks:
+      - minio-net
+
+  demo-ui:
+    image: nginx:1.27-alpine
+    container_name: minio-demo-ui
+    depends_on:
+      - demo-api
+    ports:
+      - "8088:8088"
+    volumes:
+      - ./demo-ui:/usr/share/nginx/html:ro
+      - ./nginx/demo-ui.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - minio-net
+
+networks:
+  minio-net:
+    driver: bridge

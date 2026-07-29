@@ -1,0 +1,5 @@
+.env
+demo-api/target/
+data/minio/*
+!data/minio/.gitkeep
+*.log
